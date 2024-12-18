@@ -1,59 +1,91 @@
-# Sarcasm Detection Project Progress
+# Text Classification Experiment Framework
 
-Hello everyone,
+This repository provides a flexible script to run text classification experiments using various datasets, pretrained models, and configurations. You can easily customize and execute experiments directly from the terminal.
 
-For my progress in the project, I first tried to build a pipeline using a Large Language Model (LLM) for sarcasm detection, leveraging the Riloff Tweet dataset from the paper I shared. You can find the dataset using this link: [Riloff Tweet Dataset](https://github.com/MirunaPislar/Sarcasm-Detection/blob/master/res/README.md).
+## Features
+- Supports multiple datasets in JSON format.
+- Utilizes pretrained models from Hugging Face Transformers.
+- Option to include additional textual features in the model.
+- Flexible parameter customization (e.g., batch size, learning rate, etc.).
+- Generates classification reports and training metrics.
 
-## Step 1: Initial LLM Model
+## Prerequisites
 
-As a starting point, I used the test dataset (588 samples) with a simple prompt to classify the input as either sarcastic or non-sarcastic:
+1. **Python 3.7+**
+2. Required libraries:
+   - `numpy`
+   - `pandas`
+   - `tensorflow`
+   - `transformers`
+   - `sklearn`
+   - `nltk`
 
-**This is a sarcasm classification task. Determine whether the following input text expresses sarcasm. Input: {input} If it does, output 'sarcastic'; otherwise, output 'non-sarcastic'.**
+Install the required libraries using:
+```bash
+pip install -r requirements.txt
+```
 
-I got the following evaluation metrics:
+## Usage
 
-- **Accuracy**: 0.43
-- **Precision**: 0.06
-- **Recall**: 0.17
-- **F1 Score**: 0.09
+Run the script with customizable parameters:
 
-## Step 2: Few-Shot Examples
+```bash
+python script_name.py \
+--dataset <path_to_dataset> \
+--model <pretrained_model_name> \
+[--use_features] \
+--batch_size <batch_size> \
+--learning_rate <learning_rate> \
+--dense_units <dense_units> \
+--dropout_rate <dropout_rate> \
+--epochs <num_epochs> \
+--max_length <max_length> \
+--test_size <test_size>
+```
 
-Next, I improved the prompt by using a technique called Few-Shot Examples from the trained samples. The prompt template is as follows:
+### Example Command
 
-**This is a sarcasm classification task. Determine whether the following input text expresses sarcasm.
+```bash
+python script_name.py \
+--dataset "./datasets/sarcasm.json" \
+--model "roberta-base" \
+--use_features \
+--batch_size 16 \
+--learning_rate 2e-5 \
+--dense_units 256 \
+--dropout_rate 0.3 \
+--epochs 5 \
+--max_length 64 \
+--test_size 0.2
+```
 
-Here are some examples:
+### Parameters
+- `--dataset`: Path to the dataset JSON file.
+- `--model`: Pretrained model name (e.g., `roberta-base`, `xlnet-base-cased`, etc.).
+- `--use_features`: (Optional) Flag to include additional features in the model.
+- `--batch_size`: Batch size for training (default: 32).
+- `--learning_rate`: Learning rate for the optimizer (default: 1e-5).
+- `--dense_units`: Number of units in the dense layer (default: 128).
+- `--dropout_rate`: Dropout rate for the dense layer (default: 0.2).
+- `--epochs`: Number of epochs for training (default: 3).
+- `--max_length`: Maximum sequence length for tokenization (default: 32).
+- `--test_size`: Proportion of data to use for testing (default: 0.15).
 
-Input: Absolutely love when water is spilled on my phone.. Just love it.. #timeforanewphone Output: non-sarcastic
+## Dataset Format
+The dataset should be in JSON format, with at least the following fields:
+- `headline`: Text data to classify.
+- `is_sarcastic`: Binary label for classification.
 
-Input: I was hoping just a LITTLE more shit could hit the fan this week. Output: non-sarcastic
+Example:
+```json
+{
+    "headline": "This is a sarcastic example.",
+    "is_sarcastic": 1
+}
+```
 
-Input: @pdomo Don't forget that Nick Foles is also the new Tom Brady. What a preseason! #toomanystudQBs #thankgodwedonthavetebow Output: sarcastic
+## Output
+- Classification report with precision, recall, and F1-score.
+- Training metrics (accuracy and loss) plotted for visualization.
 
-Input: I constantly see tweets about Arsenal on Twitter. Thanks for keeping the world updated @ZachBaugus & @shawnxh. #HugeArsenalFans Output: sarcastic
 
-Now, classify the following input text:
-
-Input: {input}
-
-If it expresses sarcasm, output 'sarcastic'; otherwise, output 'non-sarcastic'.**
-
-This led to a slight improvement in accuracy:
-
-- **Accuracy**: 0.45
-- **Precision**: 0.05
-- **Recall**: 0.14
-- **F1 Score**: 0.07
-
-## Step 3: Retrieval-Augmented Generation (RAG)
-
-Finally, I implemented the Retrieval-Augmented Generation (RAG) process, where I store the trained data as external knowledge (in a vector database) to aid the LLM in classification. After testing RAG with the same test data (data that the LLM hadn't seen before), the accuracy improved significantly to:
-
-- **Accuracy**: 0.84
-
-For all the details, I've uploaded the source code along with the data on GitHub.
-
----
-
-Thank you for following along with the progress of this project!

@@ -1,90 +1,87 @@
-import argparse
+import numpy as np
+import pandas as pd
 import tensorflow as tf
+import matplotlib.pyplot as plt
+import re
+import nltk
 from transformers import AutoTokenizer, TFAutoModel
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
-import pandas as pd
-import re
-import nltk
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
+import os
+import argparse
 
-# Download NLTK resources
 nltk.download('stopwords')
-
-# Load contractions
-contractions = pd.read_csv('contractions.csv', index_col='Contraction', encoding='latin-1')
-contractions.index = contractions.index.str.lower()
-contractions.Meaning = contractions.Meaning.str.lower()
-contractions_dict = contractions.to_dict()['Meaning']
-
-# Regex patterns
-urlPattern = r"((http://)[^ ]*|(https://)[^ ]*|(www\.)[^ ]*)"  # URLs
-userPattern = '@[^\s]+'                                        # @USERNAME
-hashtagPattern = r'#\S+'                                       # Hashtags
-sequencePattern = r"(.)\1\1+"                                  # Consecutive letters
-seqReplacePattern = r"\1\1"                                    # Replace long sequences
-text_cleaning_re = "@\S+|https?:\S+|http?:\S|[^A-Za-z0-9]+"    # General text cleaning
-
-# NLTK components
 stop_words = stopwords.words('english')
 stemmer = SnowballStemmer('english')
 
-# Preprocessing function: Replace contractions, remove patterns, normalize text
-def preprocess_apply(tweet):
+# Define text preprocessing functions
+def preprocess_apply(tweet, contractions_dict):
     tweet = tweet.lower()
-    # Remove URLs
-    tweet = re.sub(urlPattern, '', tweet)
-    # Remove @USERNAME mentions
-    tweet = re.sub(userPattern, '', tweet)
-    # Remove hashtags
-    tweet = re.sub(hashtagPattern, '', tweet)
-    # Replace 3+ consecutive letters by 2 letters
-    tweet = re.sub(sequencePattern, seqReplacePattern, tweet)
-    # Replace contractions
+    tweet = re.sub(r"http[s]?://\S+", "", tweet)
+    tweet = re.sub(r"@\S+", "", tweet)
+    tweet = re.sub(r"[^A-Za-z0-9]+", " ", tweet)
     for contraction, replacement in contractions_dict.items():
         tweet = tweet.replace(contraction, replacement)
-    # Add spaces around slashes
-    tweet = re.sub(r'/', ' / ', tweet)
     return tweet.strip()
 
-# Preprocessing function: Remove stop words, apply stemming
 def preprocess(tweet, stem=True):
-    tweet = re.sub(text_cleaning_re, ' ', str(tweet).lower()).strip()
-    tokens = []
-    for token in tweet.split():
-        if token not in stop_words:
-            if stem:
-                tokens.append(stemmer.stem(token))
-            else:
-                tokens.append(token)
+    tokens = [stemmer.stem(word) if stem else word for word in tweet.split() if word not in stop_words]
     return " ".join(tokens)
 
-# Encode sentences using tokenizer
-def encode_sentences(sentences, tokenizer, max_length):
-    encoded_ids = []
+# Feature extraction function
+def extract_features(text):
+    return [
+        len(re.findall(r'[\U0001F600-\U0001F64F]', text)),
+        len(re.findall(r'[!?.]', text)),
+        len(re.findall(r'#\S+', text)),
+        len(re.findall(r'@\S+', text)),
+        sum(1 for c in text if c.isupper()),
+        len(re.findall(r'(.)\1{2,}', text)),
+        len(re.findall(r'\b(very|so|totally|really)\b', text, re.IGNORECASE)),
+        len(re.findall(r'\b(oh|wow|oops|ugh|eh)\b', text, re.IGNORECASE))
+    ]
+
+# Encode sentences and features
+def encode_inputs(sentences, tokenizer, max_length, use_features=False):
+    input_ids = []
+    extra_features = []
+
     for sentence in sentences:
         encoding = tokenizer.encode_plus(
             sentence,
             max_length=max_length,
             truncation=True,
-            add_special_tokens=True,
-            return_token_type_ids=False,
             padding='max_length',
             return_attention_mask=False
         )
-        encoded_ids.append(encoding['input_ids'])
-    return tf.convert_to_tensor(encoded_ids)
+        input_ids.append(encoding['input_ids'])
 
-# Build model architecture
-def build_model(pretrained_model_name, max_length, dense_units, dropout_rate, learning_rate):
-    base_model = TFAutoModel.from_pretrained(pretrained_model_name)
-    input_word_ids = tf.keras.Input(shape=(max_length,), dtype=tf.int32, name="input_word_ids")
-    embedding = base_model(input_word_ids).last_hidden_state[:, 0, :]  # Extract [CLS] token
-    dense = tf.keras.layers.Dense(dense_units, activation='relu')(embedding)
+        if use_features:
+            features = extract_features(sentence)
+            extra_features.append(features)
+
+    return np.array(input_ids), (np.array(extra_features) if use_features else None)
+
+# Build the model
+def build_model(pretrained_model_name, feature_size, max_length, dense_units, dropout_rate, learning_rate, use_features=False):
+    text_input = tf.keras.Input(shape=(max_length,), dtype=tf.int32, name="text_input")
+    transformer_model = TFAutoModel.from_pretrained(pretrained_model_name)
+    transformer_output = transformer_model(text_input).last_hidden_state[:, 0, :]
+
+    if use_features:
+        extra_input = tf.keras.Input(shape=(feature_size,), dtype=tf.float32, name="extra_features")
+        combined = tf.keras.layers.Concatenate()([transformer_output, extra_input])
+    else:
+        combined = transformer_output
+
+    dense = tf.keras.layers.Dense(dense_units, activation='relu')(combined)
     dense = tf.keras.layers.Dropout(dropout_rate)(dense)
     output = tf.keras.layers.Dense(1, activation='sigmoid')(dense)
-    model = tf.keras.Model(inputs=input_word_ids, outputs=output)
+
+    inputs = [text_input] if not use_features else [text_input, extra_input]
+    model = tf.keras.Model(inputs=inputs, outputs=output)
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate),
@@ -93,91 +90,85 @@ def build_model(pretrained_model_name, max_length, dense_units, dropout_rate, le
     )
     return model
 
-# Main function
 def main(args):
-    # Load dataset
-    print("Loading dataset...")
-    data = pd.read_json(args.dataset, lines=True) if args.dataset.endswith(".json") else pd.read_csv(args.dataset)
-    
-    # Preprocess text
-    print("Preprocessing text...")
-    data['processed_text'] = data[args.text_column].apply(preprocess_apply)
-    data['processed_text'] = data['processed_text'].apply(preprocess)
+    print(f"Using Dataset: {args.dataset}")
+    print(f"Using Pretrained Model: {args.model}")
 
-    labels = data[args.label_column].values
+    # Load dataset
+    data = pd.read_json(args.dataset, lines=True)
+    contractions_dict = {"can't": "cannot", "n't": "not"}  # Add more contractions as needed
+
+    if args.use_features:
+        data['features'] = data['headline'].apply(lambda x: extract_features(x))
+
+    data['processed_text'] = data['headline'].apply(lambda x: preprocess_apply(x, contractions_dict)).apply(preprocess)
+
+    labels = data['is_sarcastic'].values
     sentences = data['processed_text'].values
 
-    # Split data
-    train_sents, test_sents, train_labels, test_labels = train_test_split(sentences, labels, test_size=0.15)
+    train_sents, test_sents, train_labels, test_labels = train_test_split(
+        sentences, labels, test_size=args.test_size, stratify=labels
+    )
 
-    # Load tokenizer
-    print(f"Loading tokenizer for {args.model}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    max_length = args.max_length
 
-    # Encode sentences
-    print("Encoding sentences...")
-    train_ids = encode_sentences(train_sents, tokenizer, args.max_length)
-    test_ids = encode_sentences(test_sents, tokenizer, args.max_length)
+    train_text_ids, train_features = encode_inputs(train_sents, tokenizer, max_length, args.use_features)
+    test_text_ids, test_features = encode_inputs(test_sents, tokenizer, max_length, args.use_features)
 
-    train_labels = tf.convert_to_tensor(train_labels)
-    test_labels = tf.convert_to_tensor(test_labels)
+    feature_size = train_features.shape[1] if args.use_features else 0
 
-    # Build and train the model
-    print("Building model...")
     model = build_model(
-        pretrained_model_name=args.model,
-        max_length=args.max_length,
+        args.model, feature_size, max_length,
         dense_units=args.dense_units,
         dropout_rate=args.dropout_rate,
-        learning_rate=args.learning_rate
+        learning_rate=args.learning_rate,
+        use_features=args.use_features
     )
 
     print("Training model...")
-    history = model.fit(
-        x=train_ids,
-        y=train_labels,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        validation_data=(test_ids, test_labels),
-        verbose=1
-    )
+    if args.use_features:
+        model.fit(
+            [train_text_ids, train_features], train_labels,
+            validation_data=([test_text_ids, test_features], test_labels),
+            epochs=args.epochs, batch_size=args.batch_size
+        )
+    else:
+        model.fit(
+            train_text_ids, train_labels,
+            validation_data=(test_text_ids, test_labels),
+            epochs=args.epochs, batch_size=args.batch_size
+        )
 
-    # Evaluate the model
-    print("Evaluating model...")
-    predictions = model.predict(test_ids)
+    predictions = model.predict([test_text_ids, test_features] if args.use_features else test_text_ids)
     predictions = (predictions.flatten() > 0.5).astype(int)
 
     print("\nClassification Report:")
-    print(classification_report(test_labels.numpy(), predictions, target_names=["Not Sarcastic", "Sarcastic"]))
+    print(classification_report(test_labels, predictions, target_names=["Not Sarcastic", "Sarcastic"]))
 
-# Argument parser
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Binary Text Classification with Pretrained Transformers and Preprocessing")
-
-    # Dataset and column arguments
-    parser.add_argument("--dataset", type=str, required=True, help="Path to the dataset file (CSV or JSON)")
-    parser.add_argument("--text_column", type=str, default="headline", help="Name of the text column")
-    parser.add_argument("--label_column", type=str, default="is_sarcastic", help="Name of the label column")
-
-    # Model and tokenizer arguments
-    parser.add_argument("--model", type=str, required=True, help="Name of the pretrained model (e.g., 'bert-base-uncased')")
-    parser.add_argument("--max_length", type=int, default=16, help="Maximum token length for input sentences")
-
-    # Training parameters
-    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
-    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for optimizer")
-    parser.add_argument("--dense_units", type=int, default=128, help="Number of units in the dense layer")
-    parser.add_argument("--dropout_rate", type=float, default=0.2, help="Dropout rate")
+    parser = argparse.ArgumentParser(description="Run text classification experiments.")
+    parser.add_argument("--dataset", type=str, required=True, help="Path to the dataset JSON file.")
+    parser.add_argument("--model", type=str, required=True, help="Pretrained model name (e.g., roberta-base).")
+    parser.add_argument("--use_features", action='store_true', help="Whether to use additional features.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for the optimizer.")
+    parser.add_argument("--dense_units", type=int, default=128, help="Number of units in the dense layer.")
+    parser.add_argument("--dropout_rate", type=float, default=0.2, help="Dropout rate for the dense layer.")
+    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs.")
+    parser.add_argument("--max_length", type=int, default=32, help="Maximum sequence length for the tokenizer.")
+    parser.add_argument("--test_size", type=float, default=0.15, help="Proportion of data to use for testing.")
 
     args = parser.parse_args()
     main(args)
-# command  python Pipline.py 
-# --dataset sarcasm_dataset.json 
-# --text_column headline 
-# --label_column is_sarcastic 
-# --model bert-base-uncased 
-# --epochs 3 --
-# batch_size 32 --
-# max_length 16 
-# --learning_rate 1e-5
+#python Pipline.py 
+# --dataset Ghosh/sarcasm_dataset.json 
+# --model roberta-base 
+# --use_features 
+# --batch_size 32 
+# --learning_rate 1e-5 
+# --dense_units 256  
+# --dropout_rate 0.2 
+# --epochs 1 
+# --max_length 32 
+# --test_size 0.2  
